@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NVC学员信息同步工具</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎓 NVC学员信息同步工具</h1>
+            <p class="subtitle">自动化处理小鹅通学员数据并同步到飞书多维表格</p>
+            <div class="header-info">
+                <div class="version-info">
+                    <span>Version 2.0.0 - 完整功能版本</span>
+                </div>
+                <div class="shutdown-controls">
+                    <button id="shutdown-btn" class="btn btn-danger btn-small">🔌 关闭服务</button>
+                </div>
+            </div>
+        </header>
+
+        <main>
+            <!-- 配置状态区域 -->
+            <div class="config-section">
+                <h2>📋 配置状态</h2>
+                <div id="config-status" class="status-card">
+                    <div class="loading">正在检查配置...</div>
+                </div>
+                <div class="config-actions">
+                    <button id="check-config-btn" class="btn btn-secondary">重新检查配置</button>
+                </div>
+            </div>
+
+            <!-- 文件上传区域 -->
+            <div class="upload-section">
+                <h2>📁 上传CSV文件并开始同步</h2>
+                <p class="section-description">请填写课程信息，选择CSV文件，然后点击上传按钮开始同步</p>
+                
+                <!-- 课程信息表单 -->
+                <div class="sync-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="course-name">课程名称</label>
+                            <input type="text" id="course-name" placeholder="例如：非暴力沟通基础课程" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="learning-date">学习日期</label>
+                            <input type="date" id="learning-date" required>
+                        </div>
+                    </div>
+                    
+                    <!-- 文件选择区域 -->
+                    <div class="file-select-area">
+                        <div class="file-select-wrapper">
+                            <input type="file" id="file-input" accept=".csv" required>
+                            <label for="file-input" class="file-select-label">
+                                <span class="file-icon">📄</span>
+                                <span class="file-text">选择CSV文件</span>
+                            </label>
+                        </div>
+                        <div id="file-info" class="file-info-display" style="display: none;">
+                            <p><strong>已选择:</strong> <span id="file-name"></span></p>
+                            <p><strong>文件大小:</strong> <span id="file-size"></span></p>
+                        </div>
+                    </div>
+                    
+                    <!-- 上传按钮 -->
+                    <button id="upload-and-sync-btn" class="btn btn-primary btn-large" disabled>
+                        📤 上传并开始同步
+                    </button>
+                </div>
+                
+                <div class="upload-actions">
+                    <a href="#csv-format-help" class="help-link">CSV格式说明</a>
+                    <span class="action-divider">|</span>
+                    <a href="#" id="download-sample-link" class="download-link">下载示例CSV</a>
+                </div>
+                
+                <p class="small-text">
+                    💡 CSV中通常只包含学员基础信息(用户ID、昵称、手机号)，课程名称和学习日期需要手动填写
+                </p>
+            </div>
+
+            <!-- 处理状态区域 -->
+            <div class="process-section">
+                <h2>⚙️ 处理状态</h2>
+                <div id="process-status" class="status-card">
+                    <div class="idle">请填写课程信息并选择CSV文件</div>
+                </div>
+                <div id="progress-bar" class="progress-bar" style="display: none;">
+                    <div class="progress-fill"></div>
+                </div>
+            </div>
+
+            <!-- 结果显示区域 -->
+            <div class="result-section" id="result-section" style="display: none;">
+                <h2>📊 处理结果</h2>
+                <div id="result-content" class="result-content"></div>
+            </div>
+
+            <!-- 帮助信息区域 -->
+            <div class="help-section" id="csv-format-help">
+                <h2>📚 CSV格式说明</h2>
+                <div class="help-content">
+                    <h3>必需字段</h3>
+                    <ul>
+                        <li><strong>用户ID</strong>: 学员在小鹅通的唯一标识</li>
+                        <li><strong>昵称/姓名</strong>: 学员姓名或昵称</li>
+                    </ul>
+                    <h3>可选字段</h3>
+                    <ul>
+                        <li><strong>手机号</strong>: 学员联系方式</li>
+                    </ul>
+                    <h3>课程信息</h3>
+                    <ul>
+                        <li><strong>课程名称</strong>: 在上方输入框中统一填写</li>
+                        <li><strong>学习日期</strong>: 在上方日期选择器中选择</li>
+                    </ul>
+                    <h3>注意事项</h3>
+                    <ul>
+                        <li>文件编码支持UTF-8、GBK等常见格式</li>
+                        <li>字段名称支持中文和英文多种写法</li>
+                        <li>课程名称和学习日期会应用到所有学员记录</li>
+                        <li>系统会自动去重，同一学员只会在学员总表中创建一条记录</li>
+                        <li>每个学员会在学习记录表中创建一条对应的学习记录</li>
+                    </ul>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>&copy; 2024 NVC中文网 - 学员信息同步工具</p>
+            <p class="tech-info">基于 FastAPI + 飞书多维表格API 构建</p>
+        </footer>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html> 
