@@ -12,6 +12,7 @@ class AppState {
         this.bindEvents();
         this.clearUploadedFileCache();
         this.checkConfig();
+        this.checkCacheStatus(); // 初始化时检查缓存状态
         this.initializeForm();
     }
 
@@ -60,7 +61,12 @@ class AppState {
         document.getElementById('check-config-btn').addEventListener('click', () => {
             this.checkConfig();
         });
-        
+
+        // 缓存管理按钮事件
+        document.getElementById('refresh-cache-btn').addEventListener('click', () => {
+            this.refreshCache();
+        });
+
         // 关闭服务按钮事件
         document.getElementById('shutdown-btn').addEventListener('click', () => {
             this.shutdownService();
@@ -441,6 +447,110 @@ class AppState {
         }
     }
 
+    // 缓存管理方法
+    async refreshCache() {
+        const button = document.getElementById('refresh-cache-btn');
+        const statusElement = document.getElementById('cache-status');
+
+        const originalText = button.innerHTML;
+        button.innerHTML = '⏳ 刷新中...';
+        button.disabled = true;
+        statusElement.innerHTML = '<div class="loading">正在刷新缓存，请稍候...</div>';
+
+        try {
+            const response = await fetch('/api/cache/refresh', {
+                method: 'POST'
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.showCacheStatus(result.data);
+                // 缓存刷新成功，状态已经在 showCacheStatus 中显示
+            } else {
+                statusElement.innerHTML = `<div class="error">❌ 缓存刷新失败: ${result.message}</div>`;
+            }
+        } catch (error) {
+            statusElement.innerHTML = `<div class="error">❌ 缓存刷新失败: ${error.message}</div>`;
+        } finally {
+            button.innerHTML = originalText;
+            button.disabled = false;
+        }
+    }
+
+    async checkCacheStatus() {
+        console.log('检查缓存状态...');
+        const statusElement = document.getElementById('cache-status');
+        statusElement.innerHTML = '<div class="loading">正在获取缓存状态...</div>';
+
+        try {
+            const response = await fetch('/api/cache/status');
+            const result = await response.json();
+            console.log('缓存状态响应:', result);
+
+            if (result.success) {
+                this.showCacheStatus(result.data);
+            } else {
+                statusElement.innerHTML = `<div class="error">❌ 获取缓存状态失败: ${result.message}</div>`;
+            }
+        } catch (error) {
+            statusElement.innerHTML = `<div class="error">❌ 获取缓存状态失败: ${error.message}</div>`;
+        }
+    }
+
+    showCacheStatus(data) {
+        console.log('显示缓存状态:', data);
+        const statusElement = document.getElementById('cache-status');
+
+        // 检查是否有自定义消息
+        if (data.message) {
+            // 根据缓存状态显示不同的样式
+            if (!data.cache_exists) {
+                // 缓存不存在
+                statusElement.innerHTML = `<div class="warning">⚠️ ${data.message}</div>`;
+                statusElement.className = 'status-card warning-highlight';
+            } else if (data.age_hours > 168) {
+                // 缓存较旧（超过7天）
+                statusElement.innerHTML = `<div class="warning">⚠️ ${data.message}</div>`;
+                statusElement.className = 'status-card warning-highlight';
+            } else {
+                // 缓存就绪
+                statusElement.innerHTML = `<div class="success">✅ ${data.message}</div>`;
+                statusElement.className = 'status-card success-highlight';
+
+                // 显示详细信息
+                if (data.last_update) {
+                    const lastUpdate = new Date(data.last_update);
+                    const updateInfo = `<div class="cache-info">最后更新: ${lastUpdate.toLocaleString('zh-CN')}</div>`;
+                    statusElement.innerHTML += updateInfo;
+                }
+            }
+        } else {
+            // 兼容旧的数据格式
+            if (!data.is_loaded) {
+                statusElement.innerHTML = '<div class="warning">⚠️ 缓存未加载，请点击"刷新学员缓存"按钮加载数据</div>';
+                return;
+            }
+
+            let html = '<div class="success">✅ 缓存已加载</div>';
+            html += '<div class="cache-details">';
+            html += '<h4>📊 缓存统计:</h4>';
+            html += `<p>• 总记录数: ${data.total_records.toLocaleString()} 条</p>`;
+            html += `<p>• 唯一用户数: ${data.unique_users.toLocaleString()} 个</p>`;
+
+            if (data.last_update) {
+                const lastUpdate = new Date(data.last_update);
+                const ageHours = data.age_hours || 0;
+                html += `<p>• 最后更新: ${lastUpdate.toLocaleString('zh-CN')}</p>`;
+                html += `<p>• 缓存年龄: ${ageHours.toFixed(1)} 小时</p>`;
+            }
+
+            html += '</div>';
+            statusElement.innerHTML = html;
+            statusElement.className = 'status-card';
+        }
+    }
+
     // 显示连接成功
     showConnectionSuccess(data) {
         const statusElement = document.getElementById('config-status');
@@ -676,9 +786,15 @@ class AppState {
         resultContent.innerHTML = html;
         resultSection.style.display = 'block';
         resultSection.classList.add('fade-in');
-        
+
         // 绑定冲突处理事件
         this.bindConflictEvents();
+
+        // 自动刷新缓存状态（延迟2秒确保后端已更新）
+        setTimeout(() => {
+            console.log('同步完成后刷新缓存状态...');
+            this.checkCacheStatus();
+        }, 2000);
     }
 
     // 绑定冲突处理事件
@@ -710,10 +826,21 @@ class AppState {
 
     // 更新选中的冲突
     async updateSelectedConflicts() {
+        console.log('开始处理冲突更新...');
+
         const selectedConflicts = [];
         const checkboxes = document.querySelectorAll('.conflict-checkbox:checked');
-        
-        checkboxes.forEach(checkbox => {
+
+        console.log('找到选中的复选框数量:', checkboxes.length);
+
+        checkboxes.forEach((checkbox, index) => {
+            console.log(`复选框 ${index + 1}:`, {
+                userId: checkbox.dataset.userId,
+                fieldName: checkbox.dataset.fieldName,
+                newValue: checkbox.dataset.newValue,
+                existingValue: checkbox.dataset.existingValue
+            });
+
             selectedConflicts.push({
                 user_id: checkbox.dataset.userId,
                 field_name: checkbox.dataset.fieldName,
@@ -721,12 +848,31 @@ class AppState {
                 existing_value: checkbox.dataset.existingValue
             });
         });
-        
+
+        console.log('选中的冲突数据:', selectedConflicts);
+
         if (selectedConflicts.length === 0) {
             alert('请选择要更新的冲突字段');
             return;
         }
-        
+
+        // 获取按钮和冲突区域
+        const updateBtn = document.getElementById('update-conflicts-btn');
+        const conflictsDiv = document.querySelector('.result-conflicts');
+
+        // 禁用按钮并显示加载状态
+        const originalText = updateBtn.innerHTML;
+        updateBtn.innerHTML = '⏳ 正在更新...';
+        updateBtn.disabled = true;
+
+        // 显示更新中状态
+        conflictsDiv.innerHTML = `
+            <div class="loading">
+                <h4>⏳ 正在更新冲突字段...</h4>
+                <p>请稍候，正在处理 ${selectedConflicts.length} 个字段更新...</p>
+            </div>
+        `;
+
         try {
             const response = await fetch('/api/conflicts/update', {
                 method: 'POST',
@@ -734,28 +880,63 @@ class AppState {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    conflicts: selectedConflicts
+                    selected_conflicts: selectedConflicts
                 })
             });
-            
+
             const result = await response.json();
-            
+
             if (result.success) {
+                // 处理错误信息，将技术错误转换为用户友好的提示
+                const friendlyErrors = result.data.errors.map(error => {
+                    if (error.includes('NumberFieldConvFail')) {
+                        return '数字字段格式转换失败（可能是数据类型不匹配）';
+                    }
+                    return error;
+                });
+
                 // 显示成功消息
-                const conflictsDiv = document.querySelector('.result-conflicts');
                 conflictsDiv.innerHTML = `
-                    <div class="success">
+                    <div class="success" style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 10px 0;">
                         <h4>✅ 冲突更新完成</h4>
-                        <p>成功更新 ${result.data.updated_count} 个字段，失败 ${result.data.failed_count} 个字段</p>
-                        ${result.data.errors.length > 0 ? `<p>错误信息: ${result.data.errors.join(', ')}</p>` : ''}
+                        <p><strong>成功更新:</strong> ${result.data.updated_count} 个字段</p>
+                        ${result.data.failed_count > 0 ? `<p><strong>更新失败:</strong> ${result.data.failed_count} 个字段</p>` : ''}
+                        ${friendlyErrors.length > 0 ? `
+                            <details style="margin-top: 10px;">
+                                <summary>查看错误详情</summary>
+                                <div style="margin-top: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 3px;">
+                                    ${friendlyErrors.map(error => `<p>• ${error}</p>`).join('')}
+                                </div>
+                            </details>
+                        ` : ''}
                     </div>
                 `;
+
+                // 滚动到结果位置
+                conflictsDiv.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                // 更新缓存状态
+                this.checkCacheStatus();
             } else {
-                alert('更新冲突字段失败: ' + result.message);
+                conflictsDiv.innerHTML = `
+                    <div class="error" style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>❌ 更新失败</h4>
+                        <p>${result.message}</p>
+                    </div>
+                `;
             }
         } catch (error) {
             console.error('更新冲突字段失败:', error);
-            alert('更新冲突字段失败: ' + error.message);
+            conflictsDiv.innerHTML = `
+                <div class="error" style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    <h4>❌ 网络错误</h4>
+                    <p>无法连接到服务器，请检查网络连接后重试</p>
+                </div>
+            `;
+        } finally {
+            // 恢复按钮状态
+            updateBtn.innerHTML = originalText;
+            updateBtn.disabled = false;
         }
     }
 

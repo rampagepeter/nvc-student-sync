@@ -7,6 +7,7 @@ from .config import AppConfig, TableConfig
 from .feishu_client import FeishuClient, FeishuAPIError, create_link_field, format_date_field
 from .csv_processor import CSVProcessor
 from .utils import ProcessLogger, create_response
+from .cache_manager import StudentCacheManager
 
 logger = logging.getLogger(__name__)
 
@@ -65,29 +66,57 @@ class FieldMappingService:
             feishu_field = self.FIELD_MAPPING.get(csv_field)
             
             if feishu_field and feishu_field in feishu_field_names:
+                # 先清理数据：去除前后空白字符
+                cleaned_value = str(value).strip() if value is not None else ""
+
+                # 跳过空值字段
+                if not cleaned_value or cleaned_value.lower() in ['nan', 'null', 'none']:
+                    self.skipped_fields.append(f"{csv_field} (空值)")
+                    continue
+
                 # 对特定字段进行特殊处理
-                processed_value = value
-                
+                processed_value = cleaned_value
+
                 if feishu_field == "年龄":
                     try:
+                        # 检查是否为空或无效值
+                        if not cleaned_value or cleaned_value.lower() in ['0', '']:
+                            self.skipped_fields.append(f"{csv_field} (年龄为空，跳过)")
+                            continue
+
                         # 将浮点数转换为整数
-                        processed_value = int(float(str(value)))
+                        age_value = int(float(cleaned_value))
+
+                        # 验证年龄范围（1-120）
+                        if age_value < 1 or age_value > 120:
+                            self.skipped_fields.append(f"{csv_field} (年龄超出范围: {age_value})")
+                            continue
+
+                        processed_value = age_value
                     except (ValueError, TypeError):
-                        # 如果转换失败，保持原值
-                        processed_value = value
+                        # 如果转换失败，跳过此字段
+                        self.skipped_fields.append(f"{csv_field} (年龄格式错误: {cleaned_value})")
+                        continue
                 elif feishu_field == "手机号":
                     try:
-                        # 将手机号转换为字符串，去掉小数点
-                        if '.' in str(value):
-                            # 如果是浮点数格式，转换为整数再转字符串
-                            processed_value = str(int(float(str(value))))
-                        else:
-                            # 如果已经是整数或字符串，直接转字符串
-                            processed_value = str(value)
-                    except (ValueError, TypeError):
-                        # 如果转换失败，保持原值
-                        processed_value = str(value)
-                
+                        # 去除手机号中的所有非数字字符
+                        phone_digits = ''.join(filter(str.isdigit, cleaned_value))
+
+                        # 如果没有数字，跳过
+                        if not phone_digits:
+                            self.skipped_fields.append(f"{csv_field} (手机号无数字: {cleaned_value})")
+                            continue
+
+                        # 验证手机号长度（通常11位）
+                        if len(phone_digits) < 7 or len(phone_digits) > 15:
+                            logger.warning(f"手机号长度异常: {phone_digits} (长度: {len(phone_digits)})")
+
+                        processed_value = phone_digits
+                    except Exception:
+                        # 如果处理失败，跳过此字段
+                        self.skipped_fields.append(f"{csv_field} (手机号处理失败: {cleaned_value})")
+                        continue
+
                 mapped_fields[feishu_field] = processed_value
                 self.updated_fields.append(f"{csv_field} -> {feishu_field}")
             elif csv_field not in ["user_id", "nickname", "phone", "course", "learning_date"]:
@@ -203,10 +232,12 @@ class SyncResult:
 
 class StudentSyncService:
     """学员同步服务"""
-    
+
     def __init__(self, config: AppConfig):
         self.config = config
         self.process_logger = ProcessLogger("学员同步")
+        # TTL设置为10000小时（约416天），实际上缓存不会过期
+        self.cache_manager = StudentCacheManager(cache_dir="cache", ttl_hours=10000)
         
     async def sync_csv_data(
         self, 
@@ -268,7 +299,10 @@ class StudentSyncService:
             self.process_logger.finish(
                 f"同步完成: 新增{result.new_students}个学员，{result.new_learning_records}条学习记录"
             )
-            
+
+            # 保存缓存更新到文件
+            await self.cache_manager.save_cache_updates()
+
             return create_response(
                 success=True,
                 message="数据同步完成",
@@ -359,15 +393,59 @@ class StudentSyncService:
         return student_id_mapping
     
     async def _batch_query_existing_students(
-        self, 
-        feishu_client: FeishuClient, 
-        student_table: TableConfig, 
+        self,
+        feishu_client: FeishuClient,
+        student_table: TableConfig,
         user_ids: List[str]
     ) -> List[Dict]:
-        """批量查询现有学员 - 使用客户端过滤方式"""
+        """批量查询现有学员 - 使用缓存优化版本"""
+        try:
+            # 确保缓存已加载
+            cache_loaded = await self.cache_manager.ensure_cache_loaded(
+                feishu_client, student_table
+            )
+
+            if not cache_loaded:
+                logger.warning("缓存加载失败，降级为直接查询")
+                # 如果缓存加载失败，使用原始方法
+                return await self._fallback_query_existing_students(
+                    feishu_client, student_table, user_ids
+                )
+
+            # 从缓存批量获取学员信息
+            cached_students = self.cache_manager.get_students_batch(user_ids)
+
+            logger.info(
+                f"从缓存查询学员: 请求 {len(user_ids)} 个，"
+                f"找到 {len(cached_students)} 个"
+            )
+
+            # 获取缓存统计信息
+            cache_stats = self.cache_manager.get_cache_stats()
+            logger.info(
+                f"缓存状态: 总记录 {cache_stats['total_records']}, "
+                f"唯一用户 {cache_stats['unique_users']}, "
+                f"缓存年龄 {cache_stats.get('age_hours', 0):.1f} 小时"
+            )
+
+            return cached_students
+
+        except Exception as e:
+            logger.error(f"使用缓存查询失败: {e}")
+            # 如果缓存查询失败，降级为直接查询
+            return await self._fallback_query_existing_students(
+                feishu_client, student_table, user_ids
+            )
+
+    async def _fallback_query_existing_students(
+        self,
+        feishu_client: FeishuClient,
+        student_table: TableConfig,
+        user_ids: List[str]
+    ) -> List[Dict]:
+        """降级方案：直接查询现有学员"""
         all_students = []
-        
-        # 使用客户端过滤方式：获取所有记录，然后在客户端进行过滤
+
         try:
             # 获取所有学员记录（分页处理）
             page_token = None
@@ -375,29 +453,29 @@ class StudentSyncService:
                 query_result = await feishu_client.query_records(
                     student_table.app_token,
                     student_table.table_id,
-                    page_size=500,  # 增大页面大小以提高效率
+                    page_size=500,
                     page_token=page_token
                 )
-                
+
                 records = query_result.get("records", [])
                 all_students.extend(records)
-                
+
                 # 检查是否有更多数据
                 if not query_result.get("has_more", False):
                     break
                 page_token = query_result.get("page_token")
-            
+
             # 客户端过滤：只保留匹配的用户ID
             filtered_students = []
             for record in all_students:
                 record_user_id = record.get("fields", {}).get("用户ID")
                 if record_user_id in user_ids:
                     filtered_students.append(record)
-            
+
             return filtered_students
-            
+
         except Exception as e:
-            logger.warning(f"批量查询学员失败: {e}")
+            logger.warning(f"降级查询学员失败: {e}")
             return []
     
     async def _create_new_student(
@@ -421,16 +499,24 @@ class StudentSyncService:
             if student_data.get("phone"):
                 phone_value = student_data["phone"]
                 try:
-                    # 如果手机号是浮点数格式，转换为整数再转字符串
-                    if '.' in str(phone_value):
-                        phone_value = str(int(float(str(phone_value))))
+                    # 去除手机号中的所有非数字字符（与更新逻辑保持一致）
+                    phone_digits = ''.join(filter(str.isdigit, str(phone_value)))
+
+                    # 如果没有数字，跳过
+                    if not phone_digits:
+                        logger.warning(f"手机号无有效数字，跳过: {phone_value}")
                     else:
-                        phone_value = str(phone_value)
-                except (ValueError, TypeError):
-                    # 如果转换失败，保持原值
-                    phone_value = str(phone_value)
-                
-                fields["手机号"] = phone_value
+                        # 验证手机号长度
+                        if len(phone_digits) < 7 or len(phone_digits) > 15:
+                            logger.warning(f"手机号长度异常: {phone_digits} (长度: {len(phone_digits)})")
+
+                        # 保持为字符串格式，因为飞书中手机号字段是文本类型
+                        fields["手机号"] = phone_digits
+
+                except Exception as e:
+                    logger.warning(f"手机号处理失败: {phone_value}, 错误: {e}")
+                    # 如果处理失败，使用清理后的字符串
+                    fields["手机号"] = str(phone_value).strip()
             
             # 添加CSV中的其他字段
             csv_all_fields = student_data.get('csv_all_fields', {})
@@ -445,7 +531,17 @@ class StudentSyncService:
                 student_table.table_id,
                 fields
             )
-            
+
+            # 更新缓存
+            if self.cache_manager.is_loaded:
+                self.cache_manager.add_student(
+                    student_data["user_id"],
+                    {
+                        "record_id": record["record_id"],
+                        "fields": fields
+                    }
+                )
+
             result.new_students += 1
             return record["record_id"]
             
@@ -498,21 +594,50 @@ class StudentSyncService:
             # 执行安全更新
             if safe_updates:
                 try:
+                    # 详细记录即将更新的字段
+                    logger.info(f"准备更新学员 {student_data['user_id']} 字段: {safe_updates}")
+
+                    # 验证数据格式
+                    for field_name, field_value in safe_updates.items():
+                        logger.debug(f"字段 {field_name}: 值='{field_value}', 类型={type(field_value)}")
+
                     await feishu_client.update_record(
                         student_table.app_token,
                         student_table.table_id,
                         record_id,
                         safe_updates
                     )
-                    
+
+                    logger.info(f"成功更新学员 {student_data['user_id']} 字段")
+
+                    # 更新缓存
+                    if self.cache_manager.is_loaded:
+                        # 获取当前缓存的记录并更新字段
+                        cached_record = self.cache_manager.get_student(student_data["user_id"])
+                        if cached_record:
+                            cached_record["fields"].update(safe_updates)
+                            self.cache_manager.update_student(
+                                student_data["user_id"],
+                                cached_record
+                            )
+
                     # 记录更新信息
                     updated_info = ", ".join([f"{k}: {v}" for k, v in safe_updates.items()])
                     self.process_logger.step(f"更新学员 {student_data['user_id']} 字段: {updated_info}")
-                    
+
                     return True
                     
                 except Exception as e:
-                    result.add_error(f"更新学员{student_data['user_id']}字段失败: {str(e)}")
+                    error_msg = f"更新学员{student_data['user_id']}字段失败: {str(e)}"
+                    logger.error(f"{error_msg} - 尝试更新的字段: {safe_updates}")
+
+                    # 检查是否是NumberFieldConvFail错误
+                    if "NumberFieldConvFail" in str(e):
+                        # 分析哪个字段可能导致了问题
+                        for field_name, field_value in safe_updates.items():
+                            logger.error(f"疑似问题字段 {field_name}: 值='{field_value}', 类型={type(field_value)}")
+
+                    result.add_error(error_msg)
                     return False
             
             # 如果有冲突，记录警告信息

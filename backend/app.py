@@ -16,6 +16,7 @@ from backend.config import config_manager
 from backend.utils import setup_logging, create_response, app_logger
 from backend.sync_service import StudentSyncService
 from backend.csv_processor import validate_csv_file
+from backend.cache_manager import StudentCacheManager
 
 # 设置日志系统
 setup_logging()
@@ -459,6 +460,141 @@ async def download_sample_csv():
     except Exception as e:
         app_logger.error(f"生成示例CSV失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# 缓存管理接口
+@app.get("/api/cache/status")
+async def get_cache_status():
+    """获取缓存状态"""
+    try:
+        import json
+        from datetime import datetime
+        from pathlib import Path
+
+        cache_dir = Path("cache")
+        cache_file = cache_dir / "students_cache.pkl"
+        meta_file = cache_dir / "cache_meta.json"
+
+        # 检查缓存文件是否存在
+        if not cache_file.exists() or not meta_file.exists():
+            return create_response(
+                success=True,
+                message="缓存状态获取成功",
+                data={
+                    "cache_exists": False,
+                    "total_records": 0,
+                    "last_update": None,
+                    "age_hours": None,
+                    "message": "缓存文件不存在，建议刷新缓存"
+                }
+            )
+
+        # 读取缓存元信息
+        try:
+            with open(meta_file, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+
+            last_update = datetime.fromisoformat(meta['last_update'])
+            age_hours = (datetime.now() - last_update).total_seconds() / 3600
+
+            # 根据缓存年龄给出建议
+            if age_hours > 168:  # 超过7天
+                message = f"缓存较旧（{age_hours:.0f}小时前），建议刷新"
+            else:
+                message = f"缓存就绪（{meta['total_records']}条记录）"
+
+            return create_response(
+                success=True,
+                message="缓存状态获取成功",
+                data={
+                    "cache_exists": True,
+                    "total_records": meta.get('total_records', 0),
+                    "unique_users": meta.get('unique_users', 0),
+                    "last_update": meta.get('last_update'),
+                    "age_hours": round(age_hours, 1),
+                    "message": message
+                }
+            )
+        except Exception as e:
+            app_logger.error(f"读取缓存元信息失败: {e}")
+            return create_response(
+                success=True,
+                message="缓存状态获取成功",
+                data={
+                    "cache_exists": True,
+                    "error": "无法读取缓存信息",
+                    "message": "缓存文件可能损坏，建议刷新缓存"
+                }
+            )
+
+    except Exception as e:
+        app_logger.error(f"获取缓存状态失败: {e}")
+        return create_response(
+            success=False,
+            message=f"获取缓存状态失败: {str(e)}"
+        )
+
+@app.post("/api/cache/refresh")
+async def refresh_cache():
+    """刷新缓存"""
+    try:
+        # 检查配置
+        if not config_manager.config:
+            return create_response(
+                success=False,
+                message="配置未加载，请检查配置文件"
+            )
+
+        # 创建缓存管理器和飞书客户端
+        cache_manager = StudentCacheManager()
+        from backend.feishu_client import FeishuClient
+
+        async with FeishuClient(config_manager.config) as feishu_client:
+            # 获取学员表配置
+            student_table = config_manager.config.student_table
+
+            # 加载所有学员到缓存
+            success = await cache_manager.load_all_students(
+                feishu_client, student_table
+            )
+
+            if success:
+                stats = cache_manager.get_cache_stats()
+                return create_response(
+                    success=True,
+                    message=f"缓存刷新成功，共加载 {stats['total_records']} 条记录",
+                    data=stats
+                )
+            else:
+                return create_response(
+                    success=False,
+                    message="缓存刷新失败"
+                )
+
+    except Exception as e:
+        app_logger.error(f"刷新缓存失败: {e}")
+        return create_response(
+            success=False,
+            message=f"刷新缓存失败: {str(e)}"
+        )
+
+@app.post("/api/cache/clear")
+async def clear_cache():
+    """清空缓存"""
+    try:
+        cache_manager = StudentCacheManager()
+        cache_manager.clear_cache()
+
+        return create_response(
+            success=True,
+            message="缓存已清空"
+        )
+    except Exception as e:
+        app_logger.error(f"清空缓存失败: {e}")
+        return create_response(
+            success=False,
+            message=f"清空缓存失败: {str(e)}"
+        )
+
 
 # 关闭服务接口
 @app.post("/api/shutdown")

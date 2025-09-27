@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+import re
 from typing import List, Dict, Any, Optional, Set
 from datetime import datetime
 import pandas as pd
@@ -58,6 +59,25 @@ class CSVProcessor:
     def __init__(self, field_mapping: Optional[Dict[str, List[str]]] = None):
         self.field_mapping = field_mapping or self.DEFAULT_FIELD_MAPPING
         self.process_logger = ProcessLogger("CSV处理")
+
+    def clean_field_value(self, value: Any) -> str:
+        """彻底清理字段值，去除所有不可见字符和多余空白"""
+        if pd.isna(value) or value is None:
+            return ""
+
+        # 转换为字符串
+        str_value = str(value)
+
+        # 去除制表符、换行符、回车符等不可见字符
+        cleaned = re.sub(r'[\t\n\r\f\v]', '', str_value)
+
+        # 去除前后空白字符
+        cleaned = cleaned.strip()
+
+        # 去除多余的空格（将多个连续空格替换为单个空格）
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+
+        return cleaned
     
     def detect_encoding(self, file_content: bytes) -> str:
         """检测文件编码"""
@@ -101,12 +121,13 @@ class CSVProcessor:
                 # 清理数据
                 cleaned_records = []
                 for record in records:
-                    # 移除空值和NaN
+                    # 移除空值和NaN，并彻底清理字段值
                     cleaned_record = {}
                     for key, value in record.items():
-                        if pd.notna(value) and str(value).strip():
-                            cleaned_record[key] = str(value).strip()
-                    
+                        cleaned_value = self.clean_field_value(value)
+                        if cleaned_value:  # 只保留有内容的字段
+                            cleaned_record[key] = cleaned_value
+
                     if cleaned_record:  # 只保留非空记录
                         cleaned_records.append(cleaned_record)
                 
