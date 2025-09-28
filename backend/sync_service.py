@@ -31,11 +31,11 @@ class FieldConflict:
 
 class FieldMappingService:
     """字段映射服务"""
-    
-    # CSV字段名到飞书字段名的映射
-    FIELD_MAPPING = {
+
+    # 默认CSV字段名到飞书字段名的映射
+    DEFAULT_FIELD_MAPPING = {
         "用户ID": "用户ID",
-        "昵称": "昵称", 
+        "昵称": "昵称",
         "手机号": "手机号",
         "姓名": "姓名",
         "城市": "城市",
@@ -47,11 +47,13 @@ class FieldMappingService:
         "行业": "行业",
         # 可以根据需要添加更多映射
     }
-    
-    def __init__(self):
+
+    def __init__(self, custom_mapping: Dict[str, str] = None):
         self.conflicts = []
         self.skipped_fields = []
         self.updated_fields = []
+        # 使用自定义映射或默认映射
+        self.field_mapping = custom_mapping or self.DEFAULT_FIELD_MAPPING.copy()
     
     def map_csv_fields_to_feishu(self, csv_fields: Dict[str, Any], feishu_field_names: List[str]) -> Dict[str, Any]:
         """将CSV字段映射到飞书字段"""
@@ -63,7 +65,16 @@ class FieldMappingService:
                 continue
                 
             # 查找映射
-            feishu_field = self.FIELD_MAPPING.get(csv_field)
+            feishu_field = self.field_mapping.get(csv_field)
+
+            # 如果没有找到直接映射，尝试解析带表格前缀的映射
+            if not feishu_field and '.' in self.field_mapping.get(csv_field, ''):
+                table_field = self.field_mapping.get(csv_field, '')
+                if table_field.startswith('student.'):
+                    feishu_field = table_field[8:]  # 移除 'student.' 前缀
+                elif table_field.startswith('learning.'):
+                    # 学习记录表的字段暂时跳过，在学习记录同步时处理
+                    continue
             
             if feishu_field and feishu_field in feishu_field_names:
                 # 先清理数据：去除前后空白字符
@@ -240,11 +251,12 @@ class StudentSyncService:
         self.cache_manager = StudentCacheManager(cache_dir="cache", ttl_hours=10000)
         
     async def sync_csv_data(
-        self, 
-        file_content: bytes, 
+        self,
+        file_content: bytes,
         filename: str,
         course_name: str = None,
-        learning_date: str = None
+        learning_date: str = None,
+        field_mapping: Dict[str, str] = None
     ) -> Dict[str, Any]:
         """同步CSV数据到飞书表格"""
         result = SyncResult()
@@ -287,7 +299,7 @@ class StudentSyncService:
                 
                 # 同步学员总表
                 student_id_mapping = await self._sync_students(
-                    feishu_client, unique_students, result
+                    feishu_client, unique_students, result, field_mapping
                 )
                 
                 # 同步学习记录表
@@ -320,10 +332,11 @@ class StudentSyncService:
             )
     
     async def _sync_students(
-        self, 
-        feishu_client: FeishuClient, 
-        unique_students: Dict[str, Dict[str, Any]], 
-        result: SyncResult
+        self,
+        feishu_client: FeishuClient,
+        unique_students: Dict[str, Dict[str, Any]],
+        result: SyncResult,
+        field_mapping: Dict[str, str] = None
     ) -> Dict[str, str]:
         """同步学员数据，返回用户ID到record_id的映射"""
         self.process_logger.step(f"开始同步学员数据: {len(unique_students)}个学员")
@@ -344,7 +357,7 @@ class StudentSyncService:
             feishu_field_names = []
         
         # 创建字段映射服务
-        field_mapping_service = FieldMappingService()
+        field_mapping_service = FieldMappingService(field_mapping)
         
         # 批量查询现有学员
         existing_students = await self._batch_query_existing_students(
@@ -746,6 +759,74 @@ class StudentSyncService:
                 "success": False,
                 "message": f"表格连接失败: {str(e)}"
             }
+
+    async def get_table_fields_info(self) -> Dict[str, Any]:
+        """获取表格字段信息（用于字段映射配置）"""
+        try:
+            async with FeishuClient(self.config) as feishu_client:
+                # 获取学员总表字段
+                student_fields = await feishu_client.get_table_fields(
+                    self.config.student_table.app_token,
+                    self.config.student_table.table_id
+                )
+
+                # 获取学习记录表字段
+                learning_fields = await feishu_client.get_table_fields(
+                    self.config.learning_record_table.app_token,
+                    self.config.learning_record_table.table_id
+                )
+
+                # 格式化字段信息
+                def format_fields(fields):
+                    return [
+                        {
+                            "field_name": f["field_name"],
+                            "field_id": f["field_id"],
+                            "type": f["type"],
+                            "type_name": self._get_field_type_name(f["type"]),
+                            "property": f.get("property", {})
+                        }
+                        for f in fields
+                    ]
+
+                return {
+                    "success": True,
+                    "data": {
+                        "student_table": {
+                            "fields": format_fields(student_fields),
+                            "field_count": len(student_fields)
+                        },
+                        "learning_record_table": {
+                            "fields": format_fields(learning_fields),
+                            "field_count": len(learning_fields)
+                        }
+                    }
+                }
+
+        except Exception as e:
+            logger.error(f"获取表格字段信息失败: {e}")
+            return {
+                "success": False,
+                "message": f"获取表格字段信息失败: {str(e)}"
+            }
+
+    def _get_field_type_name(self, field_type: int) -> str:
+        """获取字段类型名称"""
+        type_mapping = {
+            1: "多行文本",
+            2: "数字",
+            3: "单选",
+            4: "多选",
+            5: "日期",
+            7: "复选框",
+            11: "人员",
+            13: "电话号码",
+            15: "超链接",
+            17: "附件",
+            1001: "关联记录",
+            1005: "单行文本"
+        }
+        return type_mapping.get(field_type, f"未知类型({field_type})")
     
     async def validate_table_structure(self) -> Dict[str, Any]:
         """验证表格结构"""

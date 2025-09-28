@@ -17,6 +17,7 @@ from backend.utils import setup_logging, create_response, app_logger
 from backend.sync_service import StudentSyncService
 from backend.csv_processor import validate_csv_file
 from backend.cache_manager import StudentCacheManager
+from backend.mapping_memory import MappingMemory
 
 # 设置日志系统
 setup_logging()
@@ -42,8 +43,9 @@ frontend_dir = Path(__file__).parent.parent / "frontend"
 if frontend_dir.exists():
     app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
-# 全局变量存储上传的文件数据
+# 全局变量存储上传的文件数据和字段映射
 uploaded_file_data = None
+current_field_mapping = None
 
 # 应用启动事件
 @app.on_event("startup")
@@ -252,6 +254,50 @@ async def upload_csv(
         
         app_logger.info(f"文件上传成功，数据已缓存 - 文件: {file.filename}, 课程: {courseName}, 日期: {learningDate}")
         
+        # 检查是否需要字段映射
+        # 如果所有CSV字段都能在默认映射中找到，则不需要互动配置
+        from .sync_service import FieldMappingService
+        default_mapping = FieldMappingService.DEFAULT_FIELD_MAPPING
+        csv_headers = csv_validation["headers"]
+
+        # 检查是否有未映射的字段（排除核心字段和已知字段）
+        # 核心字段：这些字段会被CSV处理器自动处理
+        core_fields = {"user_id", "nickname", "phone", "course", "learning_date"}
+        # 已知字段的所有可能变体
+        known_field_variants = set()
+        for field in default_mapping.keys():
+            known_field_variants.add(field)
+            # 添加常见的变体
+            known_field_variants.add(field.replace(" ", ""))  # 去除空格
+            known_field_variants.add(field.replace("　", ""))  # 去除全角空格
+
+        unmapped_fields = []
+        mapped_fields = []
+
+        for header in csv_headers:
+            # 标准化字段名（去除空格等）
+            normalized_header = header.strip().replace(" ", "").replace("　", "")
+
+            # 检查是否是核心字段
+            if any(core in normalized_header.lower() for core in ["userid", "用户id", "昵称", "nickname", "手机", "phone"]):
+                mapped_fields.append(header)
+                continue
+
+            # 检查是否在默认映射中
+            if header in default_mapping or normalized_header in known_field_variants:
+                mapped_fields.append(header)
+            else:
+                unmapped_fields.append(header)
+
+        # 只有当有未映射字段时才需要显示映射界面
+        need_mapping = len(unmapped_fields) > 0
+
+        if need_mapping:
+            app_logger.info(f"检测到 {len(unmapped_fields)} 个未映射的字段: {unmapped_fields}")
+            app_logger.info(f"已知映射的字段: {mapped_fields}")
+        else:
+            app_logger.info(f"所有字段都可以使用默认映射，无需互动配置。已映射字段: {mapped_fields}")
+
         return create_response(
             success=True,
             message="文件上传成功，可以开始同步",
@@ -262,7 +308,10 @@ async def upload_csv(
                 "encoding": csv_validation["encoding"],
                 "preview_rows": csv_validation.get("preview_rows", 0),
                 "courseName": courseName.strip(),
-                "learningDate": learningDate.strip()
+                "learningDate": learningDate.strip(),
+                "need_mapping": need_mapping,
+                "csv_headers": csv_validation["headers"],
+                "unmapped_fields": unmapped_fields if need_mapping else []
             }
         )
         
@@ -273,11 +322,87 @@ async def upload_csv(
             message=f"文件上传失败: {str(e)}"
         )
 
+# 获取表格字段信息接口
+@app.get("/api/table/fields")
+async def get_table_fields():
+    """获取飞书表格字段信息"""
+    try:
+        app_logger.info("获取飞书表格字段信息")
+
+        # 检查配置
+        if not config_manager.config:
+            app_logger.error("配置未加载")
+            return create_response(
+                success=False,
+                message="配置未加载，请检查配置文件"
+            )
+
+        # 验证配置
+        validation_result = config_manager.validate_config(config_manager.config)
+        if not validation_result["valid"]:
+            app_logger.error(f"配置验证失败: {validation_result.get('errors', [])}")
+            return create_response(
+                success=False,
+                message="配置验证失败",
+                data=validation_result
+            )
+
+        # 创建同步服务并获取字段信息
+        sync_service = StudentSyncService(config_manager.config)
+        fields_info = await sync_service.get_table_fields_info()
+
+        app_logger.info("飞书表格字段信息获取成功")
+        return create_response(
+            success=True,
+            message="字段信息获取成功",
+            data=fields_info
+        )
+
+    except Exception as e:
+        app_logger.error(f"获取表格字段信息失败: {e}", exc_info=True)
+        return create_response(
+            success=False,
+            message=f"获取表格字段信息失败: {str(e)}"
+        )
+
+# 设置字段映射接口
+@app.post("/api/mapping/set")
+async def set_field_mapping(request: dict):
+    """设置字段映射配置"""
+    global current_field_mapping
+
+    try:
+        mapping = request.get('mapping', {})
+
+        if not isinstance(mapping, dict):
+            return create_response(
+                success=False,
+                message="映射配置格式错误"
+            )
+
+        current_field_mapping = mapping
+        app_logger.info(f"字段映射配置已保存: {len(mapping)} 个映射")
+
+        return create_response(
+            success=True,
+            message="字段映射配置成功",
+            data={
+                "mapping_count": len(mapping)
+            }
+        )
+
+    except Exception as e:
+        app_logger.error(f"设置字段映射失败: {e}", exc_info=True)
+        return create_response(
+            success=False,
+            message=f"设置字段映射失败: {str(e)}"
+        )
+
 # 同步处理接口
 @app.post("/api/sync")
 async def sync_data():
     """执行数据同步"""
-    global uploaded_file_data
+    global uploaded_file_data, current_field_mapping
     
     try:
         app_logger.info("开始同步数据处理...")
@@ -316,18 +441,28 @@ async def sync_data():
         sync_service = StudentSyncService(config_manager.config)
         
         app_logger.info("开始调用同步服务...")
+        # 添加字段映射信息到日志
+        if current_field_mapping:
+            app_logger.info(f"使用自定义字段映射: {len(current_field_mapping)} 个映射")
+            for csv_field, feishu_field in current_field_mapping.items():
+                app_logger.info(f"  {csv_field} → {feishu_field}")
+        else:
+            app_logger.info("使用默认字段映射")
+
         result = await sync_service.sync_csv_data(
             uploaded_file_data["content"],
             uploaded_file_data["filename"],
             course_name=uploaded_file_data.get("courseName"),
-            learning_date=uploaded_file_data.get("learningDate")
+            learning_date=uploaded_file_data.get("learningDate"),
+            field_mapping=current_field_mapping
         )
         
         app_logger.info(f"同步服务完成，结果: {result.get('success', False)}")
         
         if result.get("success"):
-            app_logger.info("同步成功，清除上传文件数据")
+            app_logger.info("同步成功，清除上传文件数据和映射配置")
             uploaded_file_data = None
+            current_field_mapping = None
         else:
             app_logger.error(f"同步失败: {result.get('message', '未知错误')}")
         
@@ -595,6 +730,145 @@ async def clear_cache():
             message=f"清空缓存失败: {str(e)}"
         )
 
+
+# 字段映射配置接口
+@app.post("/api/mapping/get-suggestion")
+async def get_mapping_suggestion(request_data: dict):
+    """获取字段映射建议（基于历史记录）"""
+    try:
+        csv_headers = request_data.get("csv_headers", [])
+
+        if not csv_headers:
+            return create_response(
+                success=False,
+                message="CSV字段列表不能为空"
+            )
+
+        # 检查配置
+        if not config_manager.config:
+            return create_response(
+                success=False,
+                message="配置未加载，请检查配置文件"
+            )
+
+        # 获取飞书表格字段
+        sync_service = StudentSyncService(config_manager.config)
+        feishu_fields_info = await sync_service.get_table_fields_info()
+
+        if not feishu_fields_info["success"]:
+            return create_response(
+                success=False,
+                message=f"获取飞书表格字段失败: {feishu_fields_info['message']}"
+            )
+
+        feishu_fields = feishu_fields_info["data"]["student_table"]["fields"]
+
+        # 获取历史映射建议
+        mapping_memory = MappingMemory()
+        suggested_mapping = mapping_memory.get_last_mapping_for_csv(csv_headers)
+
+        return create_response(
+            success=True,
+            message="映射建议获取成功",
+            data={
+                "csv_headers": csv_headers,
+                "feishu_fields": feishu_fields,
+                "suggestion": suggested_mapping,
+                "has_history": suggested_mapping is not None
+            }
+        )
+
+    except Exception as e:
+        app_logger.error(f"获取映射建议失败: {e}")
+        return create_response(
+            success=False,
+            message=f"获取映射建议失败: {str(e)}"
+        )
+
+@app.post("/api/mapping/save")
+async def save_mapping(request_data: dict):
+    """保存字段映射配置"""
+    try:
+        csv_headers = request_data.get("csv_headers", [])
+        mapping = request_data.get("mapping", {})
+
+        if not csv_headers or not mapping:
+            return create_response(
+                success=False,
+                message="CSV字段列表和映射配置不能为空"
+            )
+
+        # 保存映射配置
+        mapping_memory = MappingMemory()
+        success = mapping_memory.save_mapping(csv_headers, mapping)
+
+        if success:
+            app_logger.info(f"保存字段映射成功: {len(mapping)}个字段")
+            return create_response(
+                success=True,
+                message="映射配置保存成功"
+            )
+        else:
+            return create_response(
+                success=False,
+                message="映射配置保存失败"
+            )
+
+    except Exception as e:
+        app_logger.error(f"保存映射配置失败: {e}")
+        return create_response(
+            success=False,
+            message=f"保存映射配置失败: {str(e)}"
+        )
+
+@app.get("/api/mapping/history")
+async def get_mapping_history():
+    """获取映射历史记录"""
+    try:
+        mapping_memory = MappingMemory()
+        history = mapping_memory.get_mapping_history()
+        statistics = mapping_memory.get_mapping_statistics()
+
+        return create_response(
+            success=True,
+            data={
+                "history": history,
+                "statistics": statistics
+            }
+        )
+
+    except Exception as e:
+        app_logger.error(f"获取映射历史失败: {e}")
+        return create_response(
+            success=False,
+            message=f"获取映射历史失败: {str(e)}"
+        )
+
+@app.delete("/api/mapping/clear")
+async def clear_mapping_history():
+    """清除映射历史记录"""
+    try:
+        mapping_memory = MappingMemory()
+        success = mapping_memory.clear_history()
+
+        if success:
+            app_logger.info("清除映射历史成功")
+            return create_response(
+                success=True,
+                message="映射历史已清除"
+            )
+        else:
+            return create_response(
+                success=False,
+                message="清除映射历史失败"
+            )
+
+    except Exception as e:
+        app_logger.error(f"清除映射历史失败: {e}")
+        return create_response(
+            success=False,
+            message=f"清除映射历史失败: {str(e)}"
+        )
 
 # 关闭服务接口
 @app.post("/api/shutdown")

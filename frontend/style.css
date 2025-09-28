@@ -1072,4 +1072,212 @@ footer {
     color: #155724;
     text-align: center;
     font-weight: bold;
+}
+
+/* 字段映射配置样式 */
+.mapping-section {
+    background: white;
+    border-radius: 12px;
+    padding: 25px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    border: 1px solid #e9ecef;
+}
+
+.mapping-content {
+    max-width: 100%;
+}
+
+.mapping-info {
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border-left: 4px solid #007bff;
+}
+
+.mapping-status {
+    margin: 0;
+    color: #495057;
+    font-size: 1rem;
+}
+
+.mapping-info.has-history {
+    background: #d1ecf1;
+    border-left-color: #17a2b8;
+}
+
+.mapping-info.has-history .mapping-status {
+    color: #0c5460;
+}
+
+/* 映射表格样式 */
+.mapping-table {
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 20px;
+}
+
+.mapping-header {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 0;
+    background: #f8f9fa;
+    border-bottom: 2px solid #dee2e6;
+    font-weight: bold;
+    color: #495057;
+}
+
+.mapping-header > div {
+    padding: 12px 15px;
+    text-align: center;
+}
+
+.csv-column {
+    border-right: 1px solid #dee2e6;
+}
+
+.arrow-column {
+    background: #e9ecef;
+    font-size: 1.2rem;
+    color: #6c757d;
+}
+
+.feishu-column {
+    border-left: 1px solid #dee2e6;
+}
+
+/* 映射行样式 */
+.mapping-row {
+    display: grid;
+    grid-template-columns: 1fr 60px 1fr;
+    gap: 0;
+    border-bottom: 1px solid #dee2e6;
+    align-items: center;
+}
+
+.mapping-row:last-child {
+    border-bottom: none;
+}
+
+.mapping-row:hover {
+    background: #f8f9fa;
+}
+
+.csv-field {
+    padding: 12px 15px;
+    border-right: 1px solid #dee2e6;
+    font-weight: 500;
+    color: #495057;
+}
+
+.mapping-arrow {
+    text-align: center;
+    font-size: 1.1rem;
+    color: #6c757d;
+    background: #f8f9fa;
+}
+
+.feishu-field {
+    padding: 8px 15px;
+    border-left: 1px solid #dee2e6;
+}
+
+.feishu-select {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #ced4da;
+    border-radius: 6px;
+    background: white;
+    font-size: 0.9rem;
+    color: #495057;
+    cursor: pointer;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+.feishu-select:focus {
+    outline: none;
+    border-color: #007bff;
+    box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+}
+
+.feishu-select option {
+    padding: 8px;
+}
+
+/* 字段类型标识 */
+.field-type {
+    font-size: 0.75rem;
+    color: #6c757d;
+    margin-left: 8px;
+    font-weight: normal;
+}
+
+/* 映射操作按钮 */
+.mapping-actions {
+    text-align: center;
+    padding-top: 15px;
+    border-top: 1px solid #dee2e6;
+}
+
+.mapping-actions .btn {
+    margin: 0 8px;
+    min-width: 140px;
+}
+
+.btn.btn-outline {
+    background: transparent;
+    color: #6c757d;
+    border: 1px solid #6c757d;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all 0.3s;
+}
+
+.btn.btn-outline:hover {
+    background: #6c757d;
+    color: white;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .mapping-header,
+    .mapping-row {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+
+    .mapping-header > div,
+    .mapping-row > div {
+        border: none !important;
+        text-align: left;
+    }
+
+    .arrow-column,
+    .mapping-arrow {
+        display: none;
+    }
+
+    .csv-field::before {
+        content: "CSV字段: ";
+        font-weight: bold;
+        color: #007bff;
+    }
+
+    .feishu-field::before {
+        content: "飞书字段: ";
+        font-weight: bold;
+        color: #28a745;
+        display: block;
+        margin-bottom: 5px;
+    }
+
+    .mapping-actions .btn {
+        display: block;
+        width: 100%;
+        margin: 5px 0;
+    }
 } 

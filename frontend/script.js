@@ -80,11 +80,11 @@ class AppState {
         
         // 表单字段变化事件
         document.getElementById('course-name').addEventListener('input', () => {
-            this.updateFormValidation();
+            this.updateUploadButton();
         });
-        
+
         document.getElementById('learning-date').addEventListener('change', () => {
-            this.updateFormValidation();
+            this.updateUploadButton();
         });
     }
 
@@ -221,14 +221,14 @@ class AppState {
     // 上传并同步
     async uploadAndSync() {
         if (this.processing) return;
-        
+
         const courseNameElement = document.getElementById('course-name');
         const learningDateElement = document.getElementById('learning-date');
         const uploadButton = document.getElementById('upload-and-sync-btn');
-        
+
         const courseName = courseNameElement.value.trim();
         const learningDate = learningDateElement.value;
-        
+
         console.log('开始上传同步，验证状态:', {
             courseName: courseName,
             learningDate: learningDate,
@@ -236,103 +236,141 @@ class AppState {
             configValid: this.configValid,
             processing: this.processing
         });
-        
+
         // 最后验证
         if (!courseName || !learningDate || !this.currentFile) {
-            const errorMsg = !courseName ? '请输入课程名称' : 
+            const errorMsg = !courseName ? '请输入课程名称' :
                             !learningDate ? '请选择学习日期' : '请选择CSV文件';
             console.error('验证失败:', errorMsg);
             this.showError(errorMsg);
             return;
         }
-        
+
         if (!this.configValid) {
             console.error('配置验证失败');
             this.showError('配置验证失败，请检查配置');
             return;
         }
-        
+
         this.processing = true;
         uploadButton.disabled = true;
         uploadButton.textContent = '上传中...';
-        
+
         try {
             // 在上传前先清除服务器端缓存，确保不会使用旧数据
             this.updateProcessStatus('正在清除旧数据...', 'loading');
             await this.clearUploadedFileCache();
-            
+
             // 第一步：上传文件
             this.updateProcessStatus('正在上传文件...', 'loading');
             this.showProgressBar();
-            
+
             const formData = new FormData();
             formData.append('file', this.currentFile);
             formData.append('courseName', courseName);
             formData.append('learningDate', learningDate);
-            
+
             console.log('发送上传请求:', {
                 fileName: this.currentFile.name,
                 courseName: courseName,
                 learningDate: learningDate
             });
-            
+
             const uploadResponse = await fetch('/api/upload', {
                 method: 'POST',
                 body: formData
             });
-            
+
             console.log('上传响应状态:', uploadResponse.status);
-            
+
             const uploadResult = await uploadResponse.json();
             console.log('上传响应数据:', uploadResult);
-            
+
             if (!uploadResult.success) {
                 throw new Error(`文件上传失败: ${uploadResult.message || '未知错误'}`);
             }
-            
-            // 第二步：开始同步
-            this.updateProcessStatus('文件上传成功，正在同步数据...', 'loading');
-            
-            console.log('开始同步请求...');
-            const syncResponse = await fetch('/api/sync', {
-                method: 'POST'
-            });
-            
-            console.log('同步响应状态:', syncResponse.status);
-            
-            const syncResult = await syncResponse.json();
-            console.log('同步响应数据:', syncResult);
-            
-            if (syncResult.success) {
-                console.log('同步成功，显示结果');
-                this.showSyncSuccess(syncResult);
-                // 重置表单
-                this.resetForm();
+
+            // 检查是否需要显示字段映射界面
+            if (uploadResult.data && uploadResult.data.need_mapping) {
+                // 显示字段映射界面
+                this.updateProcessStatus('检测到未映射字段，请配置字段映射', 'idle');
+                await this.showMappingInterface(uploadResult.data.csv_headers);
+                return; // 等待用户确认映射后再继续
             } else {
-                throw new Error(`同步失败: ${syncResult.message || '未知错误'}`);
+                // 不需要映射，直接开始同步
+                this.updateProcessStatus('所有字段都可使用默认映射，开始同步...', 'loading');
+                await this.performSync();
             }
-            
+
         } catch (error) {
             console.error('上传同步过程出错:', error);
             console.error('错误详情:', {
                 message: error.message,
                 stack: error.stack
             });
-            
+
             // 显示详细错误信息
-            const errorMessage = error.message.includes('NetworkError') || error.message.includes('fetch') 
-                ? '网络连接失败，请检查网络或服务器状态' 
+            const errorMessage = error.message.includes('NetworkError') || error.message.includes('fetch')
+                ? '网络连接失败，请检查网络或服务器状态'
                 : error.message;
-            
+
             this.showError(errorMessage);
             this.updateProcessStatus(`❌ ${errorMessage}`, 'error');
-            
+
         } finally {
+            // 只有在没有进入映射界面时才重置状态
+            if (!this.currentCsvHeaders) {
+                this.processing = false;
+                this.hideProgressBar();
+                uploadButton.disabled = false;
+                uploadButton.textContent = '📤 上传并开始同步';
+                // 重新检查按钮状态
+                this.updateUploadButton();
+            }
+        }
+    }
+
+    // 执行同步操作
+    async performSync() {
+        try {
+            this.updateProcessStatus('文件上传成功，正在同步数据...', 'loading');
+
+            console.log('开始同步请求...');
+            const syncResponse = await fetch('/api/sync', {
+                method: 'POST'
+            });
+
+            console.log('同步响应状态:', syncResponse.status);
+
+            const syncResult = await syncResponse.json();
+            console.log('同步响应数据:', syncResult);
+
+            if (syncResult.success) {
+                console.log('同步成功，显示结果');
+                this.showSyncSuccess(syncResult);
+                // 保存映射到历史记录
+                if (this.currentMapping && this.currentCsvHeaders) {
+                    await this.saveMappingToHistory(this.currentCsvHeaders, this.currentMapping);
+                }
+                // 重置表单
+                this.resetForm();
+            } else {
+                throw new Error(`同步失败: ${syncResult.message || '未知错误'}`);
+            }
+        } catch (error) {
+            console.error('同步过程出错:', error);
+            this.showError('同步失败: ' + error.message);
+            this.updateProcessStatus(`❌ 同步失败: ${error.message}`, 'error');
+        } finally {
+            // 重置处理状态
             this.processing = false;
             this.hideProgressBar();
+            const uploadButton = document.getElementById('upload-and-sync-btn');
             uploadButton.disabled = false;
             uploadButton.textContent = '📤 上传并开始同步';
-            // 重新检查按钮状态
+            // 清除映射数据
+            this.currentCsvHeaders = null;
+            this.currentMapping = null;
             this.updateUploadButton();
         }
     }
@@ -975,6 +1013,188 @@ class AppState {
         this.updateProcessStatus(`✅ ${message}`, 'success');
     }
 
+    // 显示字段映射界面
+    async showMappingInterface(csvHeaders) {
+        try {
+            this.updateProcessStatus('正在获取字段信息...', 'loading');
+
+            // 获取飞书表格字段信息
+            const fieldsResponse = await fetch('/api/table/fields');
+            const fieldsResult = await fieldsResponse.json();
+
+            if (!fieldsResult.success) {
+                throw new Error('获取飞书字段信息失败: ' + fieldsResult.message);
+            }
+
+            // 获取历史映射建议
+            const suggestionResponse = await fetch('/api/mapping/get-suggestion', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    csv_headers: csvHeaders
+                })
+            });
+
+            const suggestionResult = await suggestionResponse.json();
+            const historicalMapping = (suggestionResult.success && suggestionResult.data && suggestionResult.data.suggestion) ? suggestionResult.data.suggestion : {};
+
+            // 显示映射界面
+            this.renderMappingInterface(csvHeaders, fieldsResult.data.data, historicalMapping);
+
+            this.updateProcessStatus('请配置字段映射', 'idle');
+
+        } catch (error) {
+            console.error('显示映射界面失败:', error);
+            this.showError('获取字段信息失败: ' + error.message);
+
+            // 重置处理状态，让用户可以重试
+            this.processing = false;
+            const uploadButton = document.getElementById('upload-and-sync-btn');
+            uploadButton.disabled = false;
+            uploadButton.textContent = '📤 上传并开始同步';
+            this.hideProgressBar();
+
+            // 更新按钮状态
+            this.updateUploadButton();
+        }
+    }
+
+    // 渲染字段映射界面
+    renderMappingInterface(csvHeaders, feishuFields, historicalMapping) {
+        const mappingSection = document.getElementById('mapping-section');
+        const mappingInfo = document.getElementById('mapping-info');
+        const mappingTable = document.getElementById('mapping-table');
+        const mappingActions = document.getElementById('mapping-actions');
+        const mappingRows = document.getElementById('mapping-rows');
+
+        // 保存当前数据
+        this.currentCsvHeaders = csvHeaders;
+        this.currentFeishuFields = feishuFields;
+        this.currentMapping = {};
+
+        // 显示映射信息
+        const studentFieldCount = feishuFields.student_table && feishuFields.student_table.fields ? feishuFields.student_table.fields.length : 0;
+        mappingInfo.innerHTML = `
+            <p class="mapping-status">检测到 ${csvHeaders.length} 个CSV字段，${studentFieldCount} 个学员表字段</p>
+            ${historicalMapping && Object.keys(historicalMapping).length > 0 ?
+                '<p class="mapping-history">✨ 已根据历史记录自动填充部分映射</p>' :
+                '<p class="mapping-new">💡 请手动配置字段映射</p>'
+            }
+        `;
+
+        // 清空并重新生成映射行
+        mappingRows.innerHTML = '';
+
+        csvHeaders.forEach((csvField, index) => {
+            const rowId = `mapping-row-${index}`;
+            const selectId = `feishu-field-${index}`;
+
+            const row = document.createElement('div');
+            row.className = 'mapping-row';
+            row.id = rowId;
+
+            row.innerHTML = `
+                <div class="csv-field">
+                    <span class="field-name">${csvField}</span>
+                </div>
+                <div class="arrow">→</div>
+                <div class="feishu-field">
+                    <select id="${selectId}" class="feishu-field-select" data-csv-field="${csvField}">
+                        <option value="">请选择字段...</option>
+                        ${this.generateFeishuFieldOptions(feishuFields)}
+                    </select>
+                </div>
+            `;
+
+            mappingRows.appendChild(row);
+
+            // 设置历史映射值
+            if (historicalMapping && historicalMapping[csvField]) {
+                const select = document.getElementById(selectId);
+                select.value = historicalMapping[csvField];
+                this.currentMapping[csvField] = historicalMapping[csvField];
+            }
+
+            // 绑定选择变化事件
+            const select = document.getElementById(selectId);
+            select.addEventListener('change', (e) => {
+                const csvField = e.target.dataset.csvField;
+                const feishuField = e.target.value;
+
+                if (feishuField) {
+                    this.currentMapping[csvField] = feishuField;
+                } else {
+                    delete this.currentMapping[csvField];
+                }
+
+                console.log('映射更新:', csvField, '→', feishuField);
+                console.log('当前映射:', this.currentMapping);
+            });
+        });
+
+        // 显示映射界面
+        mappingSection.style.display = 'block';
+        mappingTable.style.display = 'block';
+        mappingActions.style.display = 'block';
+
+        // 滚动到映射界面
+        mappingSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // 生成飞书字段选项
+    generateFeishuFieldOptions(feishuFields) {
+        let options = '';
+
+        // 学员表字段
+        if (feishuFields.student_table && feishuFields.student_table.fields) {
+            options += '<optgroup label="学员表字段">';
+            feishuFields.student_table.fields.forEach((field) => {
+                const displayName = `${field.field_name} (${field.type_name})`;
+                options += `<option value="student.${field.field_name}">${displayName}</option>`;
+            });
+            options += '</optgroup>';
+        }
+
+        // 学习记录表字段
+        if (feishuFields.learning_record_table && feishuFields.learning_record_table.fields) {
+            options += '<optgroup label="学习记录表字段">';
+            feishuFields.learning_record_table.fields.forEach((field) => {
+                const displayName = `${field.field_name} (${field.type_name})`;
+                options += `<option value="learning.${field.field_name}">${displayName}</option>`;
+            });
+            options += '</optgroup>';
+        }
+
+        return options;
+    }
+
+    // 保存映射到历史记录
+    async saveMappingToHistory(csvHeaders, mapping) {
+        try {
+            const response = await fetch('/api/mapping/save', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    csv_headers: csvHeaders,
+                    mapping: mapping
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                console.log('映射历史保存成功');
+            } else {
+                console.warn('映射历史保存失败:', result.message);
+            }
+        } catch (error) {
+            console.warn('保存映射历史时出错:', error);
+        }
+    }
+
     // 关闭服务
     async shutdownService() {
         // 显示确认对话框
@@ -1082,16 +1302,118 @@ class AppState {
     }
 }
 
+// 全局映射操作函数
+async function confirmMapping() {
+    const app = window.appInstance;
+    if (!app) {
+        console.error('应用实例未找到');
+        return;
+    }
+
+    console.log('确认映射，当前映射:', app.currentMapping);
+
+    // 检查是否有必需字段的映射
+    const requiredFields = ['用户ID', '昵称', '姓名', 'user_id', 'nickname', 'name'];
+    const hasCriticalMapping = app.currentCsvHeaders.some(csvField => {
+        const normalizedField = csvField.toLowerCase();
+        return requiredFields.some(req => normalizedField.includes(req.toLowerCase()));
+    });
+
+    if (!hasCriticalMapping && Object.keys(app.currentMapping).length === 0) {
+        alert('请至少映射一个字段，建议映射用户ID或昵称字段');
+        return;
+    }
+
+    try {
+        // 发送映射配置到后端
+        app.updateProcessStatus('正在保存字段映射配置...', 'loading');
+
+        const mappingResponse = await fetch('/api/mapping/set', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                mapping: app.currentMapping
+            })
+        });
+
+        const mappingResult = await mappingResponse.json();
+
+        if (!mappingResult.success) {
+            throw new Error('保存字段映射配置失败: ' + mappingResult.message);
+        }
+
+        console.log('字段映射配置已发送到后端');
+
+        // 隐藏映射界面
+        const mappingSection = document.getElementById('mapping-section');
+        mappingSection.style.display = 'none';
+
+        // 继续同步流程
+        await app.performSync();
+
+    } catch (error) {
+        console.error('确认映射失败:', error);
+        app.showError('确认映射失败: ' + error.message);
+        app.updateProcessStatus('映射配置失败', 'error');
+    }
+}
+
+function clearMapping() {
+    const app = window.appInstance;
+    if (!app) {
+        console.error('应用实例未找到');
+        return;
+    }
+
+    // 清除所有选择
+    document.querySelectorAll('.feishu-field-select').forEach(select => {
+        select.value = '';
+    });
+
+    // 清除当前映射
+    app.currentMapping = {};
+
+    console.log('映射已清除');
+}
+
+function cancelMapping() {
+    const app = window.appInstance;
+    if (!app) {
+        console.error('应用实例未找到');
+        return;
+    }
+
+    // 隐藏映射界面
+    const mappingSection = document.getElementById('mapping-section');
+    mappingSection.style.display = 'none';
+
+    // 重置处理状态
+    app.updateProcessStatus('已取消字段映射配置', 'idle');
+
+    // 重置处理状态
+    app.processing = false;
+    const uploadButton = document.getElementById('upload-and-sync-btn');
+    uploadButton.disabled = false;
+    uploadButton.textContent = '📤 上传并开始同步';
+
+    console.log('映射配置已取消');
+}
+
 // 页面加载完成后初始化应用
 document.addEventListener('DOMContentLoaded', () => {
     console.log('页面DOM加载完成，开始初始化应用...');
-    
+
     const app = new AppState();
-    
+
+    // 将应用实例绑定到全局，供映射函数使用
+    window.appInstance = app;
+
     // 添加一些调试信息
     console.log('NVC学员信息同步工具已加载');
-    console.log('Version: 2.1.0 - 简化版本 (调试模式)');
-    
+    console.log('Version: 2.1.0 - 字段映射版本 (调试模式)');
+
     // 3秒后检查一次状态
     setTimeout(() => {
         console.log('3秒后状态检查:', {
