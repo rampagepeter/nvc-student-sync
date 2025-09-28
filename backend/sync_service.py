@@ -712,10 +712,15 @@ class StudentSyncService:
             
             for field_name, new_value in new_fields.items():
                 if field_name not in conflicted_fields:
-                    # 检查是否为空字段（可以安全更新）
-                    existing_value = existing_student.get("fields", {}).get(field_name)
-                    if not existing_value or str(existing_value).strip() == "":
+                    # 备注字段特殊处理：即使有内容也要更新（因为是追加）
+                    if field_name == "备注":
+                        # 备注字段总是更新（detect_conflicts已经处理了合并）
                         safe_updates[field_name] = new_value
+                    else:
+                        # 其他字段：只更新空字段
+                        existing_value = existing_student.get("fields", {}).get(field_name)
+                        if not existing_value or str(existing_value).strip() == "":
+                            safe_updates[field_name] = new_value
             
             # 执行安全更新
             if safe_updates:
