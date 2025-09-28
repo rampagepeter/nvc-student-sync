@@ -48,22 +48,48 @@ class FieldMappingService:
         # 可以根据需要添加更多映射
     }
 
-    def __init__(self, custom_mapping: Dict[str, str] = None):
+    def __init__(self, custom_mapping: Dict[str, Any] = None):
         self.conflicts = []
         self.skipped_fields = []
         self.updated_fields = []
-        # 使用自定义映射或默认映射
-        self.field_mapping = custom_mapping or self.DEFAULT_FIELD_MAPPING.copy()
+
+        # 处理新的映射数据结构
+        if custom_mapping and isinstance(custom_mapping, dict):
+            # 检查是否为新格式（包含regular_mappings和note_mappings）
+            if 'regular_mappings' in custom_mapping or 'note_mappings' in custom_mapping:
+                self.field_mapping = custom_mapping.get('regular_mappings', {})
+                self.note_mappings = custom_mapping.get('note_mappings', [])
+            else:
+                # 兼容旧格式
+                self.field_mapping = custom_mapping.copy()
+                self.note_mappings = []
+        else:
+            # 使用默认映射
+            self.field_mapping = self.DEFAULT_FIELD_MAPPING.copy()
+            self.note_mappings = []
     
-    def map_csv_fields_to_feishu(self, csv_fields: Dict[str, Any], feishu_field_names: List[str]) -> Dict[str, Any]:
-        """将CSV字段映射到飞书字段"""
+    def map_csv_fields_to_feishu(self, csv_fields: Dict[str, Any], feishu_field_names: List[str],
+                                course_name: str = None, learning_date: str = None) -> Dict[str, Any]:
+        """将CSV字段映射到飞书字段，支持备注字段的多对一映射"""
         mapped_fields = {}
-        
+
+        # 处理备注字段的多对一映射
+        if self.note_mappings and len(self.note_mappings) > 0:
+            note_content = self._build_note_content(csv_fields, course_name, learning_date)
+            if note_content and "备注" in feishu_field_names:
+                mapped_fields["备注"] = note_content
+                self.updated_fields.append(f"多字段 -> 备注")
+
+        # 处理常规一对一映射
         for csv_field, value in csv_fields.items():
+            # 跳过映射到备注的字段，因为已经在上面处理了
+            if csv_field in self.note_mappings:
+                continue
+
             # 跳过空值
             if not value or str(value).strip() == "":
                 continue
-                
+
             # 查找映射
             feishu_field = self.field_mapping.get(csv_field)
 
@@ -75,7 +101,7 @@ class FieldMappingService:
                 elif table_field.startswith('learning.'):
                     # 学习记录表的字段暂时跳过，在学习记录同步时处理
                     continue
-            
+
             if feishu_field and feishu_field in feishu_field_names:
                 # 先清理数据：去除前后空白字符
                 cleaned_value = str(value).strip() if value is not None else ""
@@ -136,28 +162,102 @@ class FieldMappingService:
                     self.skipped_fields.append(f"{csv_field} (表格中无此字段: {feishu_field})")
                 else:
                     self.skipped_fields.append(f"{csv_field} (无映射规则)")
-        
+
         return mapped_fields
     
     def detect_conflicts(self, new_fields: Dict[str, Any], existing_record: Dict[str, Any], user_id: str, nickname: str = None) -> List[FieldConflict]:
         """检测字段冲突"""
         conflicts = []
         existing_fields = existing_record.get("fields", {})
-        
+
         for field_name, new_value in new_fields.items():
             existing_value = existing_fields.get(field_name)
-            
-            # 如果现有值不为空且与新值不同，则认为是冲突
-            if (existing_value and 
-                str(existing_value).strip() != "" and 
+
+            # 备注字段采用追加模式，不视为冲突
+            if field_name == "备注":
+                # 如果是备注字段，合并内容而不是报告冲突
+                if existing_value and str(existing_value).strip():
+                    merged_content = self._append_to_existing_note(str(existing_value), str(new_value))
+                    new_fields[field_name] = merged_content
+                continue
+
+            # 其他字段的正常冲突检测
+            if (existing_value and
+                str(existing_value).strip() != "" and
                 str(existing_value).strip() != str(new_value).strip()):
-                
+
                 conflict = FieldConflict(field_name, existing_value, new_value, user_id, nickname)
                 conflicts.append(conflict)
                 self.conflicts.append(conflict)
-        
+
         return conflicts
-    
+
+    def _build_note_content(self, csv_fields: Dict[str, Any], course_name: str = None, learning_date: str = None) -> str:
+        """构建备注字段内容"""
+        if not self.note_mappings:
+            return ""
+
+        # 格式化课程标题
+        title_parts = []
+
+        # 处理日期格式化 (转换为YYYYMM格式)
+        if learning_date:
+            try:
+                from datetime import datetime
+                # 尝试解析日期
+                if '-' in learning_date:
+                    # 假设格式为 YYYY-MM-DD 或 YYYY-M-D
+                    date_obj = datetime.strptime(learning_date, '%Y-%m-%d')
+                elif '/' in learning_date:
+                    # 假设格式为 YYYY/MM/DD 或 MM/DD/YYYY
+                    if learning_date.count('/') == 2:
+                        parts = learning_date.split('/')
+                        if len(parts[0]) == 4:  # YYYY/MM/DD
+                            date_obj = datetime.strptime(learning_date, '%Y/%m/%d')
+                        else:  # MM/DD/YYYY
+                            date_obj = datetime.strptime(learning_date, '%m/%d/%Y')
+
+                formatted_date = date_obj.strftime('%Y%m')
+                title_parts.append(formatted_date)
+            except (ValueError, AttributeError):
+                # 如果解析失败，直接使用原始日期
+                title_parts.append(learning_date.replace('-', '').replace('/', '')[:6])
+
+        # 添加课程名
+        if course_name:
+            title_parts.append(course_name)
+
+        # 构建标题
+        title = "-".join(title_parts) if title_parts else "课程记录"
+
+        # 构建内容行
+        content_lines = [f">>> {title}", ""]  # 标题后空一行
+
+        # 添加映射字段的内容
+        for csv_field in self.note_mappings:
+            value = csv_fields.get(csv_field)
+            if value and str(value).strip():
+                cleaned_value = str(value).strip()
+                # 跳过明显的空值
+                if cleaned_value.lower() not in ['nan', 'null', 'none', '']:
+                    content_lines.append(f"[{csv_field}]")
+                    content_lines.append(cleaned_value)
+                    content_lines.append("")  # 每个字段后空一行
+
+        # 如果有内容，移除最后的空行
+        if len(content_lines) > 2:
+            content_lines.pop()
+
+        return "\n".join(content_lines)
+
+    def _append_to_existing_note(self, existing_note: str, new_content: str) -> str:
+        """将新内容追加到现有备注"""
+        if not existing_note or existing_note.strip() == "":
+            return new_content
+
+        # 在现有内容后空一行再追加新内容
+        return existing_note.rstrip() + "\n\n" + new_content
+
     def get_summary(self) -> Dict[str, Any]:
         """获取字段处理摘要"""
         return {
@@ -299,7 +399,8 @@ class StudentSyncService:
                 
                 # 同步学员总表
                 student_id_mapping = await self._sync_students(
-                    feishu_client, unique_students, result, field_mapping
+                    feishu_client, unique_students, result, field_mapping,
+                    course_name=course_name, learning_date=learning_date
                 )
                 
                 # 同步学习记录表
@@ -336,7 +437,9 @@ class StudentSyncService:
         feishu_client: FeishuClient,
         unique_students: Dict[str, Dict[str, Any]],
         result: SyncResult,
-        field_mapping: Dict[str, str] = None
+        field_mapping: Dict[str, str] = None,
+        course_name: str = None,
+        learning_date: str = None
     ) -> Dict[str, str]:
         """同步学员数据，返回用户ID到record_id的映射"""
         self.process_logger.step(f"开始同步学员数据: {len(unique_students)}个学员")
@@ -380,17 +483,19 @@ class StudentSyncService:
                 if user_id in student_id_mapping:
                     # 现有学员，检查并更新字段
                     updated = await self._update_student_if_needed(
-                        feishu_client, student_table, student_data, 
+                        feishu_client, student_table, student_data,
                         student_id_mapping[user_id], existing_students_mapping[user_id],
-                        field_mapping_service, feishu_field_names, result
+                        field_mapping_service, feishu_field_names, result,
+                        course_name=course_name, learning_date=learning_date
                     )
                     if updated:
                         result.updated_students += 1
                 else:
                     # 新学员，创建记录
                     record_id = await self._create_new_student(
-                        feishu_client, student_table, student_data, 
-                        field_mapping_service, feishu_field_names, result
+                        feishu_client, student_table, student_data,
+                        field_mapping_service, feishu_field_names, result,
+                        course_name=course_name, learning_date=learning_date
                     )
                     if record_id:
                         student_id_mapping[user_id] = record_id
@@ -492,13 +597,15 @@ class StudentSyncService:
             return []
     
     async def _create_new_student(
-        self, 
-        feishu_client: FeishuClient, 
-        student_table: TableConfig, 
-        student_data: Dict[str, Any], 
+        self,
+        feishu_client: FeishuClient,
+        student_table: TableConfig,
+        student_data: Dict[str, Any],
         field_mapping_service: 'FieldMappingService',
         feishu_field_names: List[str],
-        result: SyncResult
+        result: SyncResult,
+        course_name: str = None,
+        learning_date: str = None
     ) -> Optional[str]:
         """创建新学员记录"""
         try:
@@ -535,7 +642,9 @@ class StudentSyncService:
             csv_all_fields = student_data.get('csv_all_fields', {})
             if csv_all_fields:
                 additional_fields = field_mapping_service.map_csv_fields_to_feishu(
-                    csv_all_fields, feishu_field_names
+                    csv_all_fields, feishu_field_names,
+                    course_name=course_name,
+                    learning_date=learning_date
                 )
                 fields.update(additional_fields)
             
@@ -563,15 +672,17 @@ class StudentSyncService:
             return None
     
     async def _update_student_if_needed(
-        self, 
-        feishu_client: FeishuClient, 
-        student_table: TableConfig, 
-        student_data: Dict[str, Any], 
-        record_id: str, 
+        self,
+        feishu_client: FeishuClient,
+        student_table: TableConfig,
+        student_data: Dict[str, Any],
+        record_id: str,
         existing_student: Dict[str, Any],
         field_mapping_service: 'FieldMappingService',
         feishu_field_names: List[str],
-        result: SyncResult
+        result: SyncResult,
+        course_name: str = None,
+        learning_date: str = None
     ) -> bool:
         """如果需要则更新学员信息"""
         try:
@@ -582,7 +693,9 @@ class StudentSyncService:
             
             # 映射CSV字段到飞书字段
             new_fields = field_mapping_service.map_csv_fields_to_feishu(
-                csv_all_fields, feishu_field_names
+                csv_all_fields, feishu_field_names,
+                course_name=course_name,
+                learning_date=learning_date
             )
             
             if not new_fields:

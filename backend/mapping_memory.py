@@ -49,7 +49,7 @@ class MappingMemory:
             "version": "1.0"
         }
 
-    def get_last_mapping_for_csv(self, csv_headers: List[str]) -> Optional[Dict[str, str]]:
+    def get_last_mapping_for_csv(self, csv_headers: List[str]) -> Optional[Dict[str, Any]]:
         """
         获取适用于当前CSV的上次映射配置
 
@@ -58,6 +58,10 @@ class MappingMemory:
 
         Returns:
             映射配置字典，如果没有匹配的历史记录则返回None
+            格式：{
+                "regular_mappings": {csv_field: feishu_field},
+                "note_mappings": [csv_field1, csv_field2]
+            }
         """
         if not self.history.get("last_mapping"):
             logger.info("没有找到历史映射配置")
@@ -67,53 +71,107 @@ class MappingMemory:
         last_headers = last.get("csv_headers", [])
         last_mapping = last.get("mapping", {})
 
-        # 检查CSV字段是否完全匹配
-        if set(csv_headers) == set(last_headers):
-            logger.info("找到完全匹配的历史映射配置")
-            return last_mapping
+        # 检查是否为新格式
+        if isinstance(last_mapping, dict) and "regular_mappings" in last_mapping:
+            # 新格式处理
+            regular_mappings = last_mapping.get("regular_mappings", {})
+            note_mappings = last_mapping.get("note_mappings", [])
 
-        # 检查是否有部分匹配的字段
-        partial_mapping = {}
-        for csv_field in csv_headers:
-            if csv_field in last_mapping:
-                partial_mapping[csv_field] = last_mapping[csv_field]
+            # 检查CSV字段是否完全匹配
+            if set(csv_headers) == set(last_headers):
+                logger.info("找到完全匹配的历史映射配置（新格式）")
+                return last_mapping
 
-        if partial_mapping:
-            logger.info(f"找到部分匹配的历史映射配置: {len(partial_mapping)}/{len(csv_headers)} 个字段")
-            return partial_mapping
+            # 部分匹配处理
+            partial_regular = {}
+            partial_note = []
+
+            for csv_field in csv_headers:
+                if csv_field in regular_mappings:
+                    partial_regular[csv_field] = regular_mappings[csv_field]
+                if csv_field in note_mappings:
+                    partial_note.append(csv_field)
+
+            if partial_regular or partial_note:
+                result = {
+                    "regular_mappings": partial_regular,
+                    "note_mappings": partial_note
+                }
+                logger.info(f"找到部分匹配的历史映射配置（新格式）: {len(partial_regular)} 常规字段, {len(partial_note)} 备注字段")
+                return result
+
+        else:
+            # 兼容旧格式
+            # 检查CSV字段是否完全匹配
+            if set(csv_headers) == set(last_headers):
+                logger.info("找到完全匹配的历史映射配置（旧格式）")
+                return {
+                    "regular_mappings": last_mapping,
+                    "note_mappings": []
+                }
+
+            # 检查是否有部分匹配的字段
+            partial_mapping = {}
+            for csv_field in csv_headers:
+                if csv_field in last_mapping:
+                    partial_mapping[csv_field] = last_mapping[csv_field]
+
+            if partial_mapping:
+                logger.info(f"找到部分匹配的历史映射配置（旧格式）: {len(partial_mapping)}/{len(csv_headers)} 个字段")
+                return {
+                    "regular_mappings": partial_mapping,
+                    "note_mappings": []
+                }
 
         logger.info("没有找到匹配的历史映射配置")
         return None
 
-    def save_mapping(self, csv_headers: List[str], mapping: Dict[str, str]) -> bool:
+    def save_mapping(self, csv_headers: List[str], mapping: Dict[str, Any]) -> bool:
         """
         保存本次映射配置
 
         Args:
             csv_headers: CSV文件的字段列表
-            mapping: 映射配置 {csv_field: feishu_field}
+            mapping: 映射配置，支持新旧格式
+                    新格式：{"regular_mappings": {csv_field: feishu_field}, "note_mappings": [csv_field]}
+                    旧格式：{csv_field: feishu_field}
 
         Returns:
             保存是否成功
         """
         try:
+            # 标准化映射格式
+            if isinstance(mapping, dict) and "regular_mappings" in mapping:
+                # 新格式
+                normalized_mapping = mapping
+                regular_count = len(mapping.get("regular_mappings", {}))
+                note_count = len(mapping.get("note_mappings", []))
+                total_mapped = regular_count + note_count
+            else:
+                # 旧格式，转换为新格式
+                normalized_mapping = {
+                    "regular_mappings": mapping,
+                    "note_mappings": []
+                }
+                total_mapped = len(mapping)
+
             # 更新最近使用的映射
             self.history["last_mapping"] = {
                 "csv_headers": csv_headers,
-                "mapping": mapping,
+                "mapping": normalized_mapping,
                 "timestamp": datetime.now().isoformat(),
                 "field_count": len(csv_headers),
-                "mapped_count": len(mapping)
+                "mapped_count": total_mapped
             }
 
             # 添加到历史记录
             history_entry = {
                 "name": f"映射_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 "csv_headers": csv_headers,
-                "mapping": mapping,
+                "mapping": normalized_mapping,
                 "timestamp": datetime.now().isoformat(),
                 "field_count": len(csv_headers),
-                "mapped_count": len(mapping)
+                "mapped_count": total_mapped
             }
 
             # 保持历史记录不超过10条
@@ -166,9 +224,24 @@ class MappingMemory:
         # 统计最常用的字段映射
         field_usage = {}
         for entry in history:
-            for csv_field, feishu_field in entry.get("mapping", {}).items():
-                key = f"{csv_field} → {feishu_field}"
-                field_usage[key] = field_usage.get(key, 0) + 1
+            mapping = entry.get("mapping", {})
+
+            # 处理新格式
+            if isinstance(mapping, dict) and "regular_mappings" in mapping:
+                # 统计常规映射
+                for csv_field, feishu_field in mapping.get("regular_mappings", {}).items():
+                    key = f"{csv_field} → {feishu_field}"
+                    field_usage[key] = field_usage.get(key, 0) + 1
+
+                # 统计备注映射
+                for csv_field in mapping.get("note_mappings", []):
+                    key = f"{csv_field} → 备注"
+                    field_usage[key] = field_usage.get(key, 0) + 1
+            else:
+                # 兼容旧格式
+                for csv_field, feishu_field in mapping.items():
+                    key = f"{csv_field} → {feishu_field}"
+                    field_usage[key] = field_usage.get(key, 0) + 1
 
         # 按使用频率排序
         most_common = sorted(field_usage.items(), key=lambda x: x[1], reverse=True)[:5]

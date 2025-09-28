@@ -1073,6 +1073,7 @@ class AppState {
         this.currentCsvHeaders = csvHeaders;
         this.currentFeishuFields = feishuFields;
         this.currentMapping = {};
+        this.noteFields = [];
 
         // 显示映射信息
         const studentFieldCount = feishuFields.student_table && feishuFields.student_table.fields ? feishuFields.student_table.fields.length : 0;
@@ -1106,15 +1107,37 @@ class AppState {
                         ${this.generateFeishuFieldOptions(feishuFields)}
                     </select>
                 </div>
+                <div class="note-actions">
+                    <button type="button" class="add-to-note-btn" data-csv-field="${csvField}" title="添加到备注字段">
+                        📝 添加到备注
+                    </button>
+                    <span class="note-indicator" id="note-indicator-${index}" style="display: none;">
+                        🔗 已添加到备注
+                    </span>
+                </div>
             `;
 
             mappingRows.appendChild(row);
 
             // 设置历史映射值
-            if (historicalMapping && historicalMapping[csvField]) {
-                const select = document.getElementById(selectId);
-                select.value = historicalMapping[csvField];
-                this.currentMapping[csvField] = historicalMapping[csvField];
+            if (historicalMapping) {
+                // 处理新格式的历史映射
+                if (historicalMapping.regular_mappings && historicalMapping.regular_mappings[csvField]) {
+                    const select = document.getElementById(selectId);
+                    select.value = historicalMapping.regular_mappings[csvField];
+                    this.currentMapping[csvField] = historicalMapping.regular_mappings[csvField];
+                }
+                // 处理备注映射
+                if (historicalMapping.note_mappings && historicalMapping.note_mappings.includes(csvField)) {
+                    this.noteFields.push(csvField);
+                    this.updateNoteIndicator(index, true);
+                }
+                // 兼容旧格式
+                if (typeof historicalMapping === 'object' && !historicalMapping.regular_mappings && historicalMapping[csvField]) {
+                    const select = document.getElementById(selectId);
+                    select.value = historicalMapping[csvField];
+                    this.currentMapping[csvField] = historicalMapping[csvField];
+                }
             }
 
             // 绑定选择变化事件
@@ -1131,6 +1154,13 @@ class AppState {
 
                 console.log('映射更新:', csvField, '→', feishuField);
                 console.log('当前映射:', this.currentMapping);
+            });
+
+            // 绑定"添加到备注"按钮事件
+            const addToNoteBtn = row.querySelector('.add-to-note-btn');
+            addToNoteBtn.addEventListener('click', (e) => {
+                const csvField = e.target.dataset.csvField;
+                this.toggleNoteField(csvField, index);
             });
         });
 
@@ -1170,9 +1200,55 @@ class AppState {
         return options;
     }
 
+    // 切换备注字段
+    toggleNoteField(csvField, index) {
+        const noteIndex = this.noteFields.indexOf(csvField);
+
+        if (noteIndex > -1) {
+            // 如果已经在备注列表中，移除它
+            this.noteFields.splice(noteIndex, 1);
+            this.updateNoteIndicator(index, false);
+
+            console.log('从备注移除字段:', csvField);
+        } else {
+            // 如果不在备注列表中，添加它
+            this.noteFields.push(csvField);
+            this.updateNoteIndicator(index, true);
+
+            console.log('添加字段到备注:', csvField);
+        }
+
+        console.log('当前备注字段:', this.noteFields);
+    }
+
+    // 更新备注指示器显示
+    updateNoteIndicator(index, isInNote) {
+        const indicator = document.getElementById(`note-indicator-${index}`);
+        const row = document.getElementById(`mapping-row-${index}`);
+        const button = row ? row.querySelector('.add-to-note-btn') : null;
+
+        if (indicator && button) {
+            if (isInNote) {
+                indicator.style.display = 'inline';
+                button.textContent = '🗑️ 从备注移除';
+                button.title = '从备注字段移除';
+            } else {
+                indicator.style.display = 'none';
+                button.textContent = '📝 添加到备注';
+                button.title = '添加到备注字段';
+            }
+        }
+    }
+
     // 保存映射到历史记录
     async saveMappingToHistory(csvHeaders, mapping) {
         try {
+            // 构建新的映射数据结构
+            const mappingData = {
+                regular_mappings: mapping || this.currentMapping,
+                note_mappings: this.noteFields || []
+            };
+
             const response = await fetch('/api/mapping/save', {
                 method: 'POST',
                 headers: {
@@ -1180,7 +1256,7 @@ class AppState {
                 },
                 body: JSON.stringify({
                     csv_headers: csvHeaders,
-                    mapping: mapping
+                    mapping: mappingData
                 })
             });
 
@@ -1325,6 +1401,14 @@ async function confirmMapping() {
     }
 
     try {
+        // 构建新的映射数据结构
+        const mappingData = {
+            regular_mappings: app.currentMapping,
+            note_mappings: app.noteFields || []
+        };
+
+        console.log('发送映射数据:', mappingData);
+
         // 发送映射配置到后端
         app.updateProcessStatus('正在保存字段映射配置...', 'loading');
 
@@ -1334,7 +1418,7 @@ async function confirmMapping() {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                mapping: app.currentMapping
+                mapping: mappingData
             })
         });
 

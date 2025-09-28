@@ -1151,7 +1151,7 @@ footer {
 /* 映射行样式 */
 .mapping-row {
     display: grid;
-    grid-template-columns: 1fr 60px 1fr;
+    grid-template-columns: 1fr 60px 1fr 200px;
     gap: 0;
     border-bottom: 1px solid #dee2e6;
     align-items: center;
@@ -1261,6 +1261,16 @@ footer {
         display: none;
     }
 
+    .note-actions {
+        border: none !important;
+        padding: 10px 0;
+    }
+
+    .add-to-note-btn {
+        width: 100%;
+        min-width: auto;
+    }
+
     .csv-field::before {
         content: "CSV字段: ";
         font-weight: bold;
@@ -1280,4 +1290,40 @@ footer {
         width: 100%;
         margin: 5px 0;
     }
+}
+
+/* 备注操作样式 */
+.note-actions {
+    padding: 8px 12px;
+    text-align: center;
+    border-left: 1px solid #dee2e6;
+}
+
+.add-to-note-btn {
+    background: #28a745;
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.3s;
+    min-width: 120px;
+}
+
+.add-to-note-btn:hover {
+    background: #218838;
+    transform: translateY(-1px);
+}
+
+.add-to-note-btn:active {
+    transform: translateY(0);
+}
+
+.note-indicator {
+    display: block;
+    color: #007bff;
+    font-size: 0.8rem;
+    margin-top: 4px;
+    font-weight: 500;
 } 
