@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Union
 import json
 import time
+import ssl
+import certifi
 
 from .utils import sanitize_log_data, ProcessLogger
 from .config import AppConfig
@@ -46,13 +48,17 @@ class TokenManager:
     async def _refresh_token(self):
         """刷新访问令牌"""
         url = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
-        
+
         payload = {
             "app_id": self.app_id,
             "app_secret": self.app_secret
         }
-        
-        async with aiohttp.ClientSession() as session:
+
+        # 创建带证书的 SSL 上下文
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+        async with aiohttp.ClientSession(connector=connector) as session:
             try:
                 async with session.post(url, json=payload) as response:
                     if response.status != 200:
@@ -83,7 +89,10 @@ class FeishuClient:
         
     async def __aenter__(self):
         """异步上下文管理器入口"""
-        self.session = aiohttp.ClientSession()
+        # 创建带证书的 SSL 上下文
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        self.session = aiohttp.ClientSession(connector=connector)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):

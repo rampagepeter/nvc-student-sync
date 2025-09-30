@@ -69,3 +69,14 @@ coverage.xml
 *.tmp
 temp/
 tmp/
+
+# Cache directory
+cache/
+
+# Test data files
+test_data.csv
+上传失败数据.csv
+*.csv
+
+# Local config (keep config directory but not the actual config)
+config/

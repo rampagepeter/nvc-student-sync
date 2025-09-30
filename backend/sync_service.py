@@ -13,20 +13,22 @@ logger = logging.getLogger(__name__)
 
 class FieldConflict:
     """字段冲突信息"""
-    def __init__(self, field_name: str, existing_value: Any, new_value: Any, user_id: str, nickname: str = None):
+    def __init__(self, field_name: str, existing_value: Any, new_value: Any, user_id: str, nickname: str = None, record_id: str = None):
         self.field_name = field_name
         self.existing_value = existing_value
         self.new_value = new_value
         self.user_id = user_id
         self.nickname = nickname or user_id  # 如果没有昵称，使用用户ID
-    
+        self.record_id = record_id  # 新增：保存record_id以加速更新
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "field_name": self.field_name,
             "existing_value": self.existing_value,
             "new_value": self.new_value,
             "user_id": self.user_id,
-            "nickname": self.nickname
+            "nickname": self.nickname,
+            "record_id": self.record_id  # 包含在返回数据中
         }
 
 class FieldMappingService:
@@ -93,12 +95,11 @@ class FieldMappingService:
             # 查找映射
             feishu_field = self.field_mapping.get(csv_field)
 
-            # 如果没有找到直接映射，尝试解析带表格前缀的映射
-            if not feishu_field and '.' in self.field_mapping.get(csv_field, ''):
-                table_field = self.field_mapping.get(csv_field, '')
-                if table_field.startswith('student.'):
-                    feishu_field = table_field[8:]  # 移除 'student.' 前缀
-                elif table_field.startswith('learning.'):
+            # 处理带表格前缀的映射（如 "student.姓名" -> "姓名"）
+            if feishu_field and '.' in feishu_field:
+                if feishu_field.startswith('student.'):
+                    feishu_field = feishu_field[8:]  # 移除 'student.' 前缀
+                elif feishu_field.startswith('learning.'):
                     # 学习记录表的字段暂时跳过，在学习记录同步时处理
                     continue
 
@@ -165,10 +166,13 @@ class FieldMappingService:
 
         return mapped_fields
     
-    def detect_conflicts(self, new_fields: Dict[str, Any], existing_record: Dict[str, Any], user_id: str, nickname: str = None) -> List[FieldConflict]:
+    def detect_conflicts(self, new_fields: Dict[str, Any], existing_record: Dict[str, Any], user_id: str, nickname: str = None, record_id: str = None) -> List[FieldConflict]:
         """检测字段冲突"""
         conflicts = []
         existing_fields = existing_record.get("fields", {})
+        # 获取record_id（如果没有传入，尝试从existing_record中获取）
+        if not record_id:
+            record_id = existing_record.get("record_id")
 
         for field_name, new_value in new_fields.items():
             existing_value = existing_fields.get(field_name)
@@ -186,7 +190,7 @@ class FieldMappingService:
                 str(existing_value).strip() != "" and
                 str(existing_value).strip() != str(new_value).strip()):
 
-                conflict = FieldConflict(field_name, existing_value, new_value, user_id, nickname)
+                conflict = FieldConflict(field_name, existing_value, new_value, user_id, nickname, record_id)
                 conflicts.append(conflict)
                 self.conflicts.append(conflict)
 
@@ -195,6 +199,21 @@ class FieldMappingService:
     def _build_note_content(self, csv_fields: Dict[str, Any], course_name: str = None, learning_date: str = None) -> str:
         """构建备注字段内容"""
         if not self.note_mappings:
+            return ""
+
+        # 检查是否所有映射字段都为空
+        has_non_empty_field = False
+        for csv_field in self.note_mappings:
+            value = csv_fields.get(csv_field)
+            if value and str(value).strip():
+                cleaned_value = str(value).strip()
+                # 跳过明显的空值
+                if cleaned_value.lower() not in ['nan', 'null', 'none', '']:
+                    has_non_empty_field = True
+                    break
+
+        # 如果所有字段都为空，不生成任何内容
+        if not has_non_empty_field:
             return ""
 
         # 格式化课程标题
@@ -690,20 +709,25 @@ class StudentSyncService:
             csv_all_fields = student_data.get('csv_all_fields', {})
             if not csv_all_fields:
                 return False
-            
+
             # 映射CSV字段到飞书字段
             new_fields = field_mapping_service.map_csv_fields_to_feishu(
                 csv_all_fields, feishu_field_names,
                 course_name=course_name,
                 learning_date=learning_date
             )
-            
+
+            # 重要：添加昵称字段到待检测字段中（确保昵称变化能被检测）
+            # 昵称是核心字段，但也应该参与冲突检测
+            if student_data.get('nickname'):
+                new_fields['昵称'] = student_data['nickname']
+
             if not new_fields:
                 return False
             
-            # 检测冲突
+            # 检测冲突（传递record_id用于优化）
             conflicts = field_mapping_service.detect_conflicts(
-                new_fields, existing_student, student_data["user_id"], student_data["nickname"]
+                new_fields, existing_student, student_data["user_id"], student_data["nickname"], record_id
             )
             
             # 分离无冲突的字段和有冲突的字段
@@ -977,11 +1001,11 @@ class StudentSyncService:
         """更新选中的冲突字段"""
         try:
             self.process_logger.start(f"开始更新{len(selected_conflicts)}个冲突字段")
-            
+
             updated_count = 0
             failed_count = 0
             errors = []
-            
+
             async with FeishuClient(self.config) as feishu_client:
                 # 测试连接
                 connection_test = await feishu_client.test_connection()
@@ -990,8 +1014,15 @@ class StudentSyncService:
                         "success": False,
                         "message": f"飞书连接失败: {connection_test['message']}"
                     }
-                
+
                 student_table = self.config.student_table
+
+                # 确保缓存已加载（用于方案1的优化）
+                cache_loaded = await self.cache_manager.ensure_cache_loaded(
+                    feishu_client, student_table
+                )
+                if cache_loaded:
+                    logger.info("缓存已加载，将使用缓存加速查找")
                 
                 # 按用户ID分组冲突
                 user_conflicts = {}
@@ -1004,25 +1035,43 @@ class StudentSyncService:
                 # 对每个用户更新冲突字段
                 for user_id, conflicts in user_conflicts.items():
                     try:
-                        # 查找用户的记录ID
-                        user_record = await self._find_user_record(feishu_client, student_table, user_id)
-                        if not user_record:
+                        # 方案3优化：优先使用冲突数据中的record_id
+                        record_id = None
+                        if conflicts[0].get("record_id"):
+                            record_id = conflicts[0]["record_id"]
+                            logger.debug(f"使用冲突数据中的record_id: {record_id}")
+                        else:
+                            # 方案1优化：从缓存查找record_id
+                            if self.cache_manager.is_loaded:
+                                cached_record = self.cache_manager.get_student(user_id)
+                                if cached_record:
+                                    record_id = cached_record.get("record_id")
+                                    logger.debug(f"从缓存找到用户 {user_id} 的record_id")
+
+                            # 最后降级到原始查找方法
+                            if not record_id:
+                                logger.warning(f"缓存未命中，降级查询用户 {user_id}")
+                                user_record = await self._find_user_record(feishu_client, student_table, user_id)
+                                if user_record:
+                                    record_id = user_record["record_id"]
+
+                        if not record_id:
                             errors.append(f"用户{user_id}不存在")
                             failed_count += len(conflicts)
                             continue
-                        
+
                         # 准备更新字段
                         update_fields = {}
                         for conflict in conflicts:
                             field_name = conflict["field_name"]
                             new_value = conflict["new_value"]
                             update_fields[field_name] = new_value
-                        
+
                         # 执行更新
                         await feishu_client.update_record(
                             student_table.app_token,
                             student_table.table_id,
-                            user_record["record_id"],
+                            record_id,
                             update_fields
                         )
                         
